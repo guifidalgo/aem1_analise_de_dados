@@ -49,6 +49,7 @@ A atividade envolveu as seguintes etapas:
 ```
 ├── analise_dados_01.Rmd   # Código-fonte em R Markdown com toda a análise
 ├── analise_dados_01.html            # Versão final do trabalho em HTML
+├── sao-paulo-properties-april-2019.csv # Arquivo com a base de dados utilizada
 └── README.md                        # Este arquivo
 ```
 
