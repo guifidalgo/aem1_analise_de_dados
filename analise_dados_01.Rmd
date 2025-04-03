@@ -1,0 +1,228 @@
+---
+title: "Análise de Dados 01"
+author: "Arthur Campedelli, Eric Lee, Guilherme Fidalgo"
+date: "2025-03-11"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(rsample)
+library(glmnet)
+library(rpart)
+library(rpart.plot)
+library(partykit)
+library(ranger)
+library(vip)
+```
+## Considerando os dados Sao Paulo Real Estate - Sale / Rent - April 2019, execute as seguintes tarefas:
+
+```{r}
+dados <- read.csv('sao-paulo-properties-april-2019.csv')
+head(dados)
+```
+### a) Calcule a frequência absoluta e relativa de cada categoria da variável “Negotiation.Type”.
+
+  Frequência absoluta:
+```{r}
+dados %>%
+  count(Negotiation.Type)
+```
+  Frequência relativa:
+```{r}
+dados %>%
+  count(Negotiation.Type) %>%
+  mutate(percentagem = n / sum(n) * 100)
+```
+
+### b) Faça um gráfico de dispersão do preço do condomínio e do preço anunciado. Como você descreveria esse tipo de relação?
+```{r}
+dados %>%
+  ggplot(aes(x = Price, y = Condo)) +
+  geom_point()
+```
+A partir do gráfico podemos afirmar que á uma forte correlação linear positiva entre os preços do condomínio e o preço anunciado, ou seja, quanto maior o preço anunciado, maior o preço do condomínio.
+Porém temos que tomar cuidado com este gráfico pois ele mostra dados tanto para Sale (venda) quanto Rent (alguel), que possuem magnitudes de preço anunciado muito diferentes, então os dados que vemos plotados com correlação linear são em suma os de venda.
+
+### c) Faça o gráfico do item anterior considerando facetas de acordo com “Negotiation.Type” (rent ou sale)
+```{r}
+dados %>%
+  ggplot(aes(x = Price, y = Condo, color = Negotiation.Type)) +
+  geom_point() +
+  facet_wrap(~Negotiation.Type, scales = 'free_x') +
+  theme(legend.position = 'none')
+```
+Por estes gráficos podemos confirmar que a forte correlação positiva ocorre tanto para imóveis anunciados para venda quanto para aluguel, em suas respectivas magnitudes, reforçando a conclusão do item anterior.
+
+### d) Crie uma tabela para identificar quais são os dez distritos com maior frequência nesse banco de dados. Utilize essa tabela para criar um gráfico de frequências ordenado de forma decrescente.
+
+```{r}
+maiores_distritos <- dados %>%
+  count(District) %>%
+  arrange(desc(n)) %>%
+  head(10)
+
+maiores_distritos %>%
+  ggplot(aes(x = fct_reorder(District, n), y=n)) +
+  geom_col() +
+  geom_text(aes(label = n), hjust = 1.2) +
+  coord_flip()+
+  labs(x = 'Distrito', y='Frequência')  
+  
+```
+
+### e) Faça um filtro nos dados considerando apenas os dados de aluguel, separe os dados em dois conjuntos (treinamento e teste) e avalaie o erro de previsão para os seguintes modelos:
+```{r}
+dados_filtrados <- dados %>%
+  filter(Negotiation.Type == 'rent')
+
+set.seed(123)
+splits <- initial_split(dados_filtrados, prop = 0.7)
+
+dados_treino <- training(splits)
+dados_teste <- testing(splits)
+
+resultados <- tibble(modelo = character(), mse = double())
+
+# Selecionando algumas features para o modelo de previsão
+formula <- Price ~ Condo + Size + Rooms + Parking + Elevator + Furnished
+
+```
+
+#### i) regressão linear
+```{r}
+fit_linear <- lm(formula, data = dados_treino)
+summary(fit_linear)
+```
+```{r}
+pred_linear <- predict(fit_linear, newdata = dados_teste)
+erro_linear <- mean((dados_teste$Price - pred_linear)^2)
+
+resultados <- resultados %>%
+  add_row(modelo = 'Regressão Linear', mse = erro_linear)
+```
+
+#### ii) regressão ridge
+```{r}
+# Preparando os dados de forma matricial, já selecionando as mesmas colunas
+x_treino <- model.matrix(formula, data = dados_treino)[, -1]
+y_treino <- dados_treino$Price
+
+x_teste <- model.matrix(formula, data = dados_teste)[, -1]
+y_teste <- dados_teste$Price
+```
+
+```{r}
+fit_ridge <- glmnet(x_treino, y_treino, alpha = 0)
+plot(fit_ridge, xvar='lambda')
+```
+```{r}
+pred_ridge <- predict(fit_ridge, newx = x_teste)
+erro_ridge <- mean((y_teste - pred_ridge)^2)
+
+resultados <- resultados %>%
+  add_row(modelo = 'Regressão Ridge', mse = erro_ridge)
+```
+#### iii) regressão LASSO
+```{r}
+fit_lasso <- glmnet(x_treino, y_treino, alpha = 1)
+plot(fit_lasso, xvar='lambda')
+```
+```{r}
+pred_lasso <- predict(fit_lasso, newx = x_teste)
+erro_lasso <- mean((y_teste - pred_lasso)^2)
+
+resultados <- resultados %>%
+  add_row(modelo = 'Regressão LASSO', mse = erro_lasso)
+```
+
+#### iv) árvore de decisão
+```{r}
+fit_arvore <- rpart(formula, data = dados_treino)
+summary(fit_arvore)
+
+rpart.plot(fit_arvore)
+```
+
+```{r}
+# Descobrindo qual o melhor valor de cp
+cp_values <- fit_arvore$cptable %>% 
+    as_tibble() %>% 
+    filter(xerror == min(xerror))
+cp_values
+```
+```{r}
+# Fazendo a poda da árvore para este valor
+fit_arvore_poda <- prune(fit_arvore, cp = cp_values$CP[1])
+rpart.plot(fit_arvore_poda)
+```
+```{r}
+pred_arvore <- predict(fit_arvore_poda, newdata = dados_teste)
+erro_arvore <- mean((dados_teste$Price - pred_arvore)^2) # Erro quadrático médio
+
+resultados <- resultados %>%
+  add_row(modelo = 'Árvore de Decisão', mse = erro_arvore)
+```
+
+
+#### v) floresta aleatória
+```{r}
+set.seed(123)
+fit_floresta <- ranger(formula, data = dados_treino)
+
+set.seed(123)
+result_floresta <- tibble(n_arvores = seq(1, 500, 5),
+                          mse = NA)
+
+for (i in 1:nrow(result_floresta)) {
+  rf <- ranger(formula, num.trees = result_floresta$n_arvores[i], data = dados_treino)
+  result_floresta$mse[i] <- rf$prediction.error
+}
+
+result_floresta %>%
+  ggplot(aes(n_arvores, mse)) + 
+  geom_line() +
+  labs(x='Número de Árvores', y = 'MSE (OOB)')
+```
+
+```{r}
+result_floresta <- crossing(mtry = c(1, 2, 3, 4, 5, 6),
+                            n_arvores = c(1:10, seq(10,500,10)))
+
+ajusta <- function(mtry, n_arvores) {
+  rf <- ranger(formula, num.trees = n_arvores, mtry = mtry, data = dados_treino)
+  return(rf$prediction.error)
+}
+
+result_floresta <- result_floresta %>%
+  mutate(mse = map2_dbl(mtry, n_arvores, ajusta))
+head(result_floresta)
+```
+
+```{r}
+result_floresta %>%
+  mutate(mtry = as.factor(mtry)) %>%
+  ggplot(aes(n_arvores, mse, color = mtry)) +
+  geom_line() +
+  labs(x = 'Número de Árvores', y = 'MSE (OOB)')
+```
+Descobrimos que o mtry =2 é o melhor valor para MSE e que ao redor de 100 árvores é o melhor valor para o número de árvores
+
+```{r}
+fit_floresta_ajustada <- ranger(formula, num.trees = 100, mtry = 2, data = dados_treino)
+
+pred_floresta <- predict(fit_floresta_ajustada, data = dados_teste)$predictions
+erro_floresta <- mean((dados_teste$Price - pred_floresta)^2)
+
+resultados <- resultados %>%
+  add_row(modelo = 'Floresta Aleatória', mse = erro_floresta)
+```
+
+```{r}
+resultados %>%
+  mutate(rmse = sqrt(mse)) %>%
+  arrange(mse)
+```
+A partir da análise dos Erros Quadrático Médios de todos os modelos podemos afirmar que a Floresta Aleatória possui melhores características preditoras para o preço de aluguel dos imóveis
+
